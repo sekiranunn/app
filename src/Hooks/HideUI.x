@@ -167,22 +167,41 @@
 
 %end
 
-// MARK: - Hide Follow button on Tweets
+// MARK: - Hide Follow and Message buttons on Tweets
 
 // The conversation focal tweet and the immersive player both render their
-// author row through TTAStatusAuthorView, so forcing the flag here covers every
-// surface.
+// author row through TTAStatusAuthorView, so applying the settings here covers
+// both surfaces.
+
+static char kMessageButtonOriginalHiddenKey;
 
 %hook TTAStatusAuthorView
 
 - (void)setFollowControlHidden:(BOOL)hidden {
     %orig([BHTSettings boolForKey:@"hide_follow_button"] ? YES : hidden);
 }
+
 - (void)didMoveToWindow {
-    if ([BHTSettings boolForKey:@"hide_follow_button"]) {
-        self.messageButton.hidden = YES;
-        self.messageButton.userInteractionEnabled = NO;
-        self.messageButton.alpha = 0.0;
+    // Undo our previous override before native code configures a reused row.
+    UIButton* messageButton = self.messageButton;
+    NSNumber* originalHidden = messageButton
+        ? objc_getAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey)
+        : nil;
+    if (originalHidden) {
+        messageButton.hidden = originalHidden.boolValue;
+        objc_setAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    %orig;
+
+    messageButton = self.messageButton;
+    if (messageButton && [BHTSettings boolForKey:@"hide_message_button"]) {
+        objc_setAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey,
+                                 @(messageButton.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // A hidden view already ignores touches; preserve native alpha and interaction.
+        messageButton.hidden = YES;
     }
 }
 
