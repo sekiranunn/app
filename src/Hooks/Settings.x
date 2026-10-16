@@ -63,7 +63,9 @@ static BOOL sectionsContainNeoFreeBirdEntry(NSArray* sections) {
         }
 
         for (id entry in (NSArray*)section) {
-            if (objc_getAssociatedObject(entry, SettingsEntryKey)) {
+            id item = unwrapDataViewItem(entry);
+            if (objc_getAssociatedObject(entry, SettingsEntryKey) ||
+                (item && objc_getAssociatedObject(item, SettingsEntryKey))) {
                 return YES;
             }
         }
