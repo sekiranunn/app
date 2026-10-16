@@ -173,36 +173,21 @@
 // author row through TTAStatusAuthorView, so applying the settings here covers
 // both surfaces.
 
-static char kMessageButtonOriginalHiddenKey;
-
 %hook TTAStatusAuthorView
 
 - (void)setFollowControlHidden:(BOOL)hidden {
     %orig([BHTSettings boolForKey:@"hide_follow_button"] ? YES : hidden);
 }
 
-- (void)didMoveToWindow {
-    // Undo our previous override before native code configures a reused row.
-    UIButton* messageButton = self.messageButton;
-    NSNumber* originalHidden = messageButton
-        ? objc_getAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey)
-        : nil;
-    if (originalHidden) {
-        messageButton.hidden = originalHidden.boolValue;
-        objc_setAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey,
-                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+// Both content updates and layout use this setter, so later frame-based
+// visibility updates cannot undo the preference. Native visibility is retained
+// when the preference is off, including for cached and reused author rows.
+- (void)_t1_screenshots_modified_setHidden:(BOOL)hidden view:(UIView*)view {
+    if (view && view == self.messageButton &&
+        [BHTSettings boolForKey:@"hide_message_button"]) {
+        hidden = YES;
     }
-
-    %orig;
-
-    messageButton = self.messageButton;
-    if (messageButton && [BHTSettings boolForKey:@"hide_message_button"]) {
-        objc_setAssociatedObject(messageButton, &kMessageButtonOriginalHiddenKey,
-                                 @(messageButton.hidden),
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // A hidden view already ignores touches; preserve native alpha and interaction.
-        messageButton.hidden = YES;
-    }
+    %orig(hidden, view);
 }
 
 %end

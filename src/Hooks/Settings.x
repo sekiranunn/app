@@ -174,11 +174,16 @@ static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* setting
 }
 %end
 
-// Async loaders can bypass updatedSections:forStyle:. Insert at the final setter
-// so native styling and rendering always receive the navigation item.
+// Insert before native item conversion. Appending a raw navigation item to the
+// converted result skips the styling/data-item wrapper used by the settings UI.
+// The canonical setter also covers direct assignments and scroll restoration.
 %hook TFNItemsDataViewController
-- (void)setSections:(NSArray*)sections {
-    %orig(sectionsWithNeoFreeBirdEntry(self, sections));
+- (NSArray*)updatedSections:(NSArray*)sections forStyle:(NSInteger)style {
+    return %orig(sectionsWithNeoFreeBirdEntry(self, sections), style);
+}
+
+- (void)setSections:(NSArray*)sections restoreScrollPosition:(BOOL)restore {
+    %orig(sectionsWithNeoFreeBirdEntry(self, sections), restore);
 }
 %end
 
