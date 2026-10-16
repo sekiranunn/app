@@ -56,7 +56,9 @@ def main():
 
         # Match the injected framework paths already used by the released app.
         old_dependencies = dependencies(old)
-        subprocess.run(["ldid", "-R", str(new)], check=True)
+        signature = subprocess.run(["codesign", "--display", str(new)], capture_output=True)
+        if signature.returncode == 0:
+            subprocess.run(["codesign", "--remove-signature", str(new)], check=True)
         for dependency in dependencies(new):
             if "substrate" in dependency.lower():
                 matches = [dep for dep in old_dependencies if "substrate" in dep.lower()]
@@ -72,7 +74,9 @@ def main():
             if dependency != replacement:
                 subprocess.run(["install_name_tool", "-change", dependency, replacement,
                                 str(new)], check=True)
-        subprocess.run(["ldid", "-S", str(new)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", "--timestamp=none",
+                        str(new)], check=True)
+        subprocess.run(["codesign", "--verify", "--strict", str(new)], check=True)
         replacement_data = new.read_bytes()
         if sha256(original) == sha256(replacement_data):
             raise ValueError("The replacement tweak is identical to the upstream tweak")
