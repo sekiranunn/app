@@ -16,39 +16,15 @@ static BOOL isSettingsClass(UIViewController* viewController) {
            [viewController isKindOfClass:objc_getClass("T1SettingsViewController")];
 }
 
-static BOOL containsSettingsController(UIViewController* controller) {
-    if (isSettingsClass(controller)) {
-        return YES;
-    }
-    for (UIViewController* child in controller.childViewControllers) {
-        if (containsSettingsController(child)) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-// Settings can be hosted inside a container instead of being the navigation
-// entry itself. The first stack entry containing settings is still the root.
+// The generic controller backs the root and every sub-page alike, so the root is
+// the first settings-class controller in the navigation stack.
 static BOOL settingsVCIsRoot(TFNItemsDataViewController* settingsVC) {
-    NSArray* stack = settingsVC.navigationController.viewControllers;
-    UIViewController* entry = settingsVC;
-    while (entry && ![stack containsObject:entry]) {
-        entry = entry.parentViewController;
-        if (isSettingsClass(entry)) {
-            return NO;
-        }
-    }
-    if (!entry) {
-        return NO;
-    }
-
-    for (UIViewController* viewController in stack) {
-        if (viewController == entry) {
+    for (UIViewController* viewController in settingsVC.navigationController.viewControllers) {
+        if (viewController == settingsVC) {
             return YES;
         }
 
-        if (containsSettingsController(viewController)) {
+        if (isSettingsClass(viewController)) {
             return NO;
         }
     }
@@ -63,9 +39,7 @@ static BOOL sectionsContainNeoFreeBirdEntry(NSArray* sections) {
         }
 
         for (id entry in (NSArray*)section) {
-            id item = unwrapDataViewItem(entry);
-            if (objc_getAssociatedObject(entry, SettingsEntryKey) ||
-                (item && objc_getAssociatedObject(item, SettingsEntryKey))) {
+            if (objc_getAssociatedObject(entry, SettingsEntryKey)) {
                 return YES;
             }
         }
@@ -118,8 +92,8 @@ static NSArray* sectionsByInsertingEntry(TFNItemsDataViewController* settingsVC,
 
 // Async settings fetches rebuild the sections and discard one-shot inserts, and
 // root-ness is unknowable during the first build (not yet on the nav stack). So
-// tag the root on appearance, retry after the navigation transition completes,
-// and keep every later sections assignment from discarding the entry.
+// tag the root in viewWillAppear, insert once to repair the first build, and let
+// the rebuild transform below re-add the entry on every later snapshot.
 static void insertNeoFreeBirdSettingsIfRoot(TFNItemsDataViewController* settingsVC) {
     if (!settingsVCIsRoot(settingsVC)) {
         return;
@@ -132,7 +106,6 @@ static void insertNeoFreeBirdSettingsIfRoot(TFNItemsDataViewController* settings
     }
 
     settingsVC.sections = sectionsByInsertingEntry(settingsVC, settingsVC.sections);
-    [settingsVC.tableView reloadData];
 }
 
 static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* settingsVC,
@@ -157,11 +130,6 @@ static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* setting
     %orig;
     insertNeoFreeBirdSettingsIfRoot(self);
 }
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    insertNeoFreeBirdSettingsIfRoot(self);
-}
 %end
 
 %hook T1SettingsViewController
@@ -169,23 +137,14 @@ static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* setting
     %orig;
     insertNeoFreeBirdSettingsIfRoot(self);
 }
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    insertNeoFreeBirdSettingsIfRoot(self);
-}
 %end
 
-// Insert before native item conversion. Appending a raw navigation item to the
-// converted result skips the styling/data-item wrapper used by the settings UI.
-// The canonical setter also covers direct assignments and scroll restoration.
+// Every sections rebuild runs through this transform right before setSections:,
+// so hooking it on the base class covers both settings roots.
 %hook TFNItemsDataViewController
 - (NSArray*)updatedSections:(NSArray*)sections forStyle:(NSInteger)style {
-    return %orig(sectionsWithNeoFreeBirdEntry(self, sections), style);
-}
-
-- (void)setSections:(NSArray*)sections restoreScrollPosition:(BOOL)restore {
-    %orig(sectionsWithNeoFreeBirdEntry(self, sections), restore);
+    NSArray* updatedSections = %orig;
+    return sectionsWithNeoFreeBirdEntry(self, updatedSections);
 }
 %end
 
