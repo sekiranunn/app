@@ -16,15 +16,39 @@ static BOOL isSettingsClass(UIViewController* viewController) {
            [viewController isKindOfClass:objc_getClass("T1SettingsViewController")];
 }
 
-// The generic controller backs the root and every sub-page alike, so the root is
-// the first settings-class controller in the navigation stack.
+static BOOL containsSettingsController(UIViewController* controller) {
+    if (isSettingsClass(controller)) {
+        return YES;
+    }
+    for (UIViewController* child in controller.childViewControllers) {
+        if (containsSettingsController(child)) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// Settings can be hosted inside a container instead of being the navigation
+// entry itself. The first stack entry containing settings is still the root.
 static BOOL settingsVCIsRoot(TFNItemsDataViewController* settingsVC) {
-    for (UIViewController* viewController in settingsVC.navigationController.viewControllers) {
-        if (viewController == settingsVC) {
+    NSArray* stack = settingsVC.navigationController.viewControllers;
+    UIViewController* entry = settingsVC;
+    while (entry && ![stack containsObject:entry]) {
+        entry = entry.parentViewController;
+        if (isSettingsClass(entry)) {
+            return NO;
+        }
+    }
+    if (!entry) {
+        return NO;
+    }
+
+    for (UIViewController* viewController in stack) {
+        if (viewController == entry) {
             return YES;
         }
 
-        if (isSettingsClass(viewController)) {
+        if (containsSettingsController(viewController)) {
             return NO;
         }
     }
@@ -92,8 +116,8 @@ static NSArray* sectionsByInsertingEntry(TFNItemsDataViewController* settingsVC,
 
 // Async settings fetches rebuild the sections and discard one-shot inserts, and
 // root-ness is unknowable during the first build (not yet on the nav stack). So
-// tag the root in viewWillAppear, insert once to repair the first build, and let
-// the rebuild transform below re-add the entry on every later snapshot.
+// tag the root on appearance, retry after the navigation transition completes,
+// and keep every later sections assignment from discarding the entry.
 static void insertNeoFreeBirdSettingsIfRoot(TFNItemsDataViewController* settingsVC) {
     if (!settingsVCIsRoot(settingsVC)) {
         return;
@@ -106,6 +130,7 @@ static void insertNeoFreeBirdSettingsIfRoot(TFNItemsDataViewController* settings
     }
 
     settingsVC.sections = sectionsByInsertingEntry(settingsVC, settingsVC.sections);
+    [settingsVC.tableView reloadData];
 }
 
 static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* settingsVC,
@@ -130,6 +155,11 @@ static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* setting
     %orig;
     insertNeoFreeBirdSettingsIfRoot(self);
 }
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    insertNeoFreeBirdSettingsIfRoot(self);
+}
 %end
 
 %hook T1SettingsViewController
@@ -137,14 +167,18 @@ static NSArray* sectionsWithNeoFreeBirdEntry(TFNItemsDataViewController* setting
     %orig;
     insertNeoFreeBirdSettingsIfRoot(self);
 }
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    insertNeoFreeBirdSettingsIfRoot(self);
+}
 %end
 
-// Every sections rebuild runs through this transform right before setSections:,
-// so hooking it on the base class covers both settings roots.
+// Async loaders can bypass updatedSections:forStyle:. Insert at the final setter
+// so native styling and rendering always receive the navigation item.
 %hook TFNItemsDataViewController
-- (NSArray*)updatedSections:(NSArray*)sections forStyle:(NSInteger)style {
-    NSArray* updatedSections = %orig;
-    return sectionsWithNeoFreeBirdEntry(self, updatedSections);
+- (void)setSections:(NSArray*)sections {
+    %orig(sectionsWithNeoFreeBirdEntry(self, sections));
 }
 %end
 
