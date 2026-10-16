@@ -44,6 +44,11 @@ extern BOOL panelIsGenuinelyAvailable(long long panelID);
 static NSString* const kGridHeaderID = @"gridHeader";
 static NSString* const kGridFooterID = @"gridFooter";
 
+static BOOL isFixedPage(NSString* page) {
+    return [page isEqualToString:CustomTabBarHomePageID] ||
+           [page isEqualToString:CustomTabBarMorePageID];
+}
+
 @interface CustomTabBarViewController () <UICollectionViewDataSource,
                                           UICollectionViewDelegateFlowLayout>
 @property (nonatomic, strong) UICollectionView* gridView;
@@ -51,7 +56,7 @@ static NSString* const kGridFooterID = @"gridFooter";
 @property (nonatomic, strong) UIView* separator;
 
 // All available tab pageIDs; and the selected ones in tab-bar order (Home
-// first).
+// first, More last).
 @property (nonatomic, strong) NSMutableArray<NSString*>* allPages;
 @property (nonatomic, strong) NSMutableArray<NSString*>* selectedPages;
 @property (nonatomic, strong) NSArray<NSString*>* originalSelection;
@@ -204,7 +209,8 @@ static NSString* const kGridFooterID = @"gridFooter";
     self.allPages = [NSMutableArray array];
     for (NSDictionary* entry in [CustomTabBarUtility availableTabs]) {
         NSNumber* panelID = entry[TabPanelIDKey];
-        if (panelID && !panelIsGenuinelyAvailable(panelID.longLongValue)) {
+        if (panelID && !isFixedPage(entry[TabPageKey]) &&
+            !panelIsGenuinelyAvailable(panelID.longLongValue)) {
             continue;
         }
         [self.allPages addObject:entry[TabPageKey]];
@@ -221,7 +227,7 @@ static NSString* const kGridFooterID = @"gridFooter";
             [self.selectedPages addObject:page];
         }
     }
-    [self pinHomeFirst];
+    [self pinFixedPages];
 
     self.originalSelection = [self.selectedPages copy];
     self.hasChanges = NO;
@@ -230,10 +236,14 @@ static NSString* const kGridFooterID = @"gridFooter";
     [self.previewView reloadData];
 }
 
-- (void)pinHomeFirst {
+- (void)pinFixedPages {
     [self.selectedPages removeObject:CustomTabBarHomePageID];
     if ([CustomTabBarUtility metadataForPage:CustomTabBarHomePageID]) {
         [self.selectedPages insertObject:CustomTabBarHomePageID atIndex:0];
+    }
+    [self.selectedPages removeObject:CustomTabBarMorePageID];
+    if ([CustomTabBarUtility metadataForPage:CustomTabBarMorePageID]) {
+        [self.selectedPages addObject:CustomTabBarMorePageID];
     }
 }
 
@@ -297,7 +307,7 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
 }
 
 - (void)persistChanges {
-    [self pinHomeFirst];
+    [self pinFixedPages];
 
     [CustomTabBarUtility setVisiblePageIDs:self.selectedPages];
 
@@ -323,6 +333,7 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
                                    style:UIAlertActionStyleDestructive
                                  handler:^(UIAlertAction* _Nonnull action) {
                                      [CustomTabBarUtility resetSelection];
+                                     [self applyLiveLayout];
                                      [self loadData];
                                      [self recomputeChanges];
                                  }]];
@@ -344,8 +355,8 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
         case UIGestureRecognizerStateBegan: {
             NSIndexPath* indexPath =
                 [self.previewView indexPathForItemAtPoint:location];
-            // Home stays pinned first and can't be dragged.
-            if (!indexPath || indexPath.item == 0) {
+            // Home and More stay pinned at the two ends.
+            if (!indexPath || isFixedPage(self.selectedPages[indexPath.item])) {
                 return;
             }
             [self.previewView beginInteractiveMovementForItemAtIndexPath:indexPath];
@@ -393,7 +404,7 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
     [cell configureWithTitle:(meta[TabTitleKey] ?: page)
                    imageName:meta[TabImageKey]
                     selected:[self.selectedPages containsObject:page]
-                       fixed:[page isEqualToString:CustomTabBarHomePageID]
+                       fixed:isFixedPage(page)
                  accentColor:CurrentAccentColor()];
     return cell;
 }
@@ -457,7 +468,7 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
     }
 
     NSString* page = self.allPages[indexPath.item];
-    if ([page isEqualToString:CustomTabBarHomePageID]) {
+    if (isFixedPage(page)) {
         return;
     }
 
@@ -466,6 +477,7 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
     } else {
         [self.selectedPages addObject:page];
     }
+    [self pinFixedPages];
 
     [self recomputeChanges];
     [self.gridView reloadItemsAtIndexPaths:@[indexPath]];
@@ -474,17 +486,26 @@ static UIViewController* findViewControllerOfClass(UIViewController* vc,
 
 - (BOOL)collectionView:(UICollectionView*)collectionView
     canMoveItemAtIndexPath:(NSIndexPath*)indexPath {
-    return collectionView == self.previewView && indexPath.item != 0;
+    return collectionView == self.previewView &&
+           !isFixedPage(self.selectedPages[indexPath.item]);
 }
 
 - (NSIndexPath*)collectionView:(UICollectionView*)collectionView
     targetIndexPathForMoveFromItemAtIndexPath:(NSIndexPath*)originalIndexPath
                           toProposedIndexPath:(NSIndexPath*)proposedIndexPath {
-    // Keep Home pinned first.
-    if (proposedIndexPath.item == 0) {
-        return [NSIndexPath indexPathForItem:1 inSection:0];
+    // Optional tabs can only move between Home and More.
+    if (collectionView != self.previewView ||
+        isFixedPage(self.selectedPages[originalIndexPath.item])) {
+        return originalIndexPath;
     }
-    return proposedIndexPath;
+    NSInteger first = [self.selectedPages.firstObject
+        isEqualToString:CustomTabBarHomePageID] ? 1 : 0;
+    NSInteger last = (NSInteger)self.selectedPages.count - 1;
+    if ([self.selectedPages.lastObject isEqualToString:CustomTabBarMorePageID]) {
+        last--;
+    }
+    NSInteger target = MAX(first, MIN((NSInteger)proposedIndexPath.item, last));
+    return [NSIndexPath indexPathForItem:target inSection:0];
 }
 
 - (void)collectionView:(UICollectionView*)collectionView

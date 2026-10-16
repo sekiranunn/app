@@ -28,9 +28,10 @@ static const NSInteger kFormatVersion = 1;
 // carried in the file.
 static NSString* const kAccentColorKey = @"bh_color_theme_selectedColor";
 static NSString* const kVisibleTabsKey = @"bh_tabs_visible";
-// Kept in step with AppIconViewController, which trusts this key over
-// UIApplication's stale alternateIconName on sideloaded installs.
+// Keep the existing JSON key for compatibility with older exports. Locally,
+// AppIconViewController only trusts choices confirmed by the system callback.
 static NSString* const kAppIconKey = @"bh_last_selected_app_icon";
+static NSString* const kConfirmedAppIconKey = @"bh_last_confirmed_app_icon";
 static NSString* const kPrimaryIconSentinel = @"PrimaryIcon";
 
 // The tab registry (every tab seen on this device) is deliberately absent: it
@@ -105,7 +106,13 @@ static NSError* BHTTransferError(BHTSettingsTransferErrorCode code, NSString* me
             // A switch the user never touched still has a defined value, and
             // writing it out keeps the import deterministic. Text and list
             // preferences have no default worth recording.
-            id value = [defaults objectForKey:key] ?: [BHTSettings settingForKey:key][@"default"];
+            id value;
+            if ([key isEqualToString:kAppIconKey]) {
+                value = [defaults stringForKey:kConfirmedAppIconKey] ?:
+                    [UIApplication sharedApplication].alternateIconName ?: kPrimaryIconSentinel;
+            } else {
+                value = [defaults objectForKey:key] ?: [BHTSettings settingForKey:key][@"default"];
+            }
             if (value && BHTValueMatchesClass(value, expected)) {
                 settings[key] = value;
             }
@@ -215,7 +222,11 @@ static NSError* BHTTransferError(BHTSettingsTransferErrorCode code, NSString* me
             !BHTValueMatchesClass(value, expected)) {
             return;
         }
-        [defaults setObject:value forKey:key];
+        // An imported icon is a request until UIKit confirms it. Never store
+        // the requested choice as the active icon before that callback.
+        if (![key isEqualToString:kAppIconKey]) {
+            [defaults setObject:value forKey:key];
+        }
         [applied addObject:key];
     }];
 
@@ -228,13 +239,13 @@ static NSError* BHTTransferError(BHTSettingsTransferErrorCode code, NSString* me
     }
 
     [defaults synchronize];
-    [self applySideEffectsForImportedKeys:applied];
+    [self applySideEffectsForImportedKeys:applied values:imported];
     return (NSInteger)applied.count;
 }
 
 // Most preferences are read straight from NSUserDefaults on use, but the accent
 // colour and the app icon are held elsewhere as well and have to be pushed.
-+ (void)applySideEffectsForImportedKeys:(NSArray<NSString*>*)keys {
++ (void)applySideEffectsForImportedKeys:(NSArray<NSString*>*)keys values:(NSDictionary*)values {
     NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
 
     if ([keys containsObject:kAccentColorKey]) {
@@ -243,10 +254,31 @@ static NSError* BHTTransferError(BHTSettingsTransferErrorCode code, NSString* me
 
     if ([keys containsObject:kAppIconKey] &&
         [UIApplication sharedApplication].supportsAlternateIcons) {
-        NSString* iconName = [defaults stringForKey:kAppIconKey];
+        NSString* iconName = values[kAppIconKey];
         NSString* toSet = [iconName isEqualToString:kPrimaryIconSentinel] ? nil : iconName;
         [[UIApplication sharedApplication] setAlternateIconName:toSet
-                                              completionHandler:^(NSError* error){}];
+                                              completionHandler:^(NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!error) {
+                    [defaults setObject:(toSet ?: kPrimaryIconSentinel)
+                                 forKey:kConfirmedAppIconKey];
+                    [defaults removeObjectForKey:kAppIconKey];
+                    return;
+                }
+
+                UIAlertController* alert = [UIAlertController
+                    alertControllerWithTitle:[[BHTBundle sharedBundle]
+                        localizedTwitterStringForKey:@"ERROR_ALERT_TITLE"]
+                                     message:error.localizedDescription
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction
+                    actionWithTitle:[[BHTBundle sharedBundle]
+                        localizedTwitterStringForKey:@"OK_ACTION_LABEL"]
+                              style:UIAlertActionStyleDefault
+                            handler:nil]];
+                [topMostController() presentViewController:alert animated:YES completion:nil];
+            });
+        }];
     }
 }
 

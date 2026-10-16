@@ -1,0 +1,119 @@
+name: Build P2 Fixes IPA
+run-name: Build P2 fixes IPA from ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - codex/fix-p2-review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p2-fixes-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      BUILD_DIR: ${{ github.workspace }}/ffmpeg-build
+      BASE_IPA_URL: https://github.com/NeoFreeBird/app/releases/download/v7.1.1/NeoFreeBird-sideloaded-Twitter_7.1.1_12.31.1.ipa
+      BASE_IPA_SHA256: 81b9234163e17372e2f32f63867a0c53fe4860aa62441fb7effc5bc54fe0baa6
+      FIX_COMMIT: ${{ github.sha }}
+
+    steps:
+      - name: Checkout patched source
+        uses: actions/checkout@v6
+        with:
+          path: main
+          submodules: recursive
+
+      - name: Download and verify upstream IPA
+        working-directory: main
+        run: |
+          curl --fail --location --retry 3 "$BASE_IPA_URL" --output "$RUNNER_TEMP/base.ipa"
+          printf '%s  %s\n' "$BASE_IPA_SHA256" "$RUNNER_TEMP/base.ipa" | shasum -a 256 --check
+
+      - name: Install dependencies
+        run: |
+          brew install make dpkg ldid
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Download Theos
+        uses: actions/checkout@v6
+        with:
+          repository: theos/theos
+          ref: master
+          path: theos
+          submodules: recursive
+
+      - name: Cache iOS SDK
+        id: sdk
+        uses: actions/cache@v6
+        with:
+          path: theos/sdks
+          key: fixed-ipa-ios-sdk-16.5
+
+      - name: Download iOS SDK
+        if: steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone -n --depth=1 --filter=tree:0 https://github.com/theos/sdks/ sdk-source
+          git -C sdk-source sparse-checkout set --no-cone iPhoneOS16.5.sdk
+          git -C sdk-source checkout
+          mkdir -p "$THEOS/sdks"
+          mv sdk-source/iPhoneOS16.5.sdk "$THEOS/sdks/"
+
+      - name: Compute ffmpeg cache key
+        id: ffmpeg-key
+        run: |
+          echo "key=fixed-ipa-ffmpeg-${{ runner.arch }}-$(xcrun --sdk iphoneos --show-sdk-version)-$(git -C main rev-parse HEAD:deps/ffmpeg-kit-next/upstream)-${{ hashFiles('main/deps/ffmpeg-kit-next/build-ffmpeg.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ffmpeg stack
+        id: ffmpeg
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ffmpeg-build
+            main/deps/ffmpeg-kit-next/build
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+
+      - name: Build ffmpeg stack
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: main/deps/ffmpeg-kit-next/build-ffmpeg.sh
+
+      - name: Save ffmpeg stack
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ffmpeg-build
+            main/deps/ffmpeg-kit-next/build
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+
+      - name: Build patched tweak
+        working-directory: main
+        run: |
+          sed -i '' 's/^TARGET.*$/TARGET := iphone:clang:16.5:15.0/' Makefile
+          make SIDELOADED=1 -j2
+
+      - name: Package and verify fixed IPA
+        working-directory: main
+        run: |
+          python3 .github/scripts/repack_fixed_ipa.py \
+            "$RUNNER_TEMP/base.ipa" \
+            .theos/obj/debug/BHTwitter.dylib \
+            'layout/Library/Application Support/BHT/BHTwitter.bundle' \
+            dist/NeoFreeBird-Twitter-7.1.1-X12.31.1-p2-fixes.ipa
+
+      - name: Upload fixed IPA and build information
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoFreeBird-p2-fixes-ipa
+          path: main/dist/
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error

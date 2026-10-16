@@ -10,30 +10,71 @@
 
 // MARK: - Hide custom timelines
 
-static __weak NSObject* PinnedTimelinesRepository;
-static NSArray* LastPinnedTimelineModels;
-static BOOL PinnedTimelinesWriteBypass = NO;
+@interface BHTPinnedTimelinePresentationState : NSObject
+@property (nonatomic, weak) id repository;
+@property (nonatomic, weak) id account;
+@property (nonatomic, copy) NSArray* models;
+@end
 
-// Applies a toggle without relaunching. Hiding rewrites the UNCHANGED pinned
-// list purely to republish — updatePinnedTimelines: persists server-side, so
-// anything else would unpin for real; the delegate hook below swaps in the
-// empty list on the way through.
+@implementation BHTPinnedTimelinePresentationState
+@end
+
+static const void* PinnedTimelinePresentationStateKey = &PinnedTimelinePresentationStateKey;
+
+static NSHashTable* PinnedTimelineControllers(void) {
+    static NSHashTable* controllers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        controllers = [NSHashTable weakObjectsHashTable];
+    });
+    return controllers;
+}
+
+static id PinnedTimelineCurrentAccount(void) {
+    Class hostClass = objc_getClass("T1HostViewController");
+    if (![hostClass respondsToSelector:@selector(sharedHostViewController)]) {
+        return nil;
+    }
+    id host = ((id (*)(id, SEL))objc_msgSend)(hostClass, @selector(sharedHostViewController));
+    return [host respondsToSelector:@selector(currentAccount)]
+        ? ((id (*)(id, SEL))objc_msgSend)(host, @selector(currentAccount)) : nil;
+}
+
+// Replay the display delegate only. updatePinnedTimelines: persists to the
+// server, so a visibility preference must never call it to refresh the tabs.
 void applyHideCustomTimelinesSetting(void) {
-    NSObject* repository = PinnedTimelinesRepository;
-    if (!repository) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ applyHideCustomTimelinesSetting(); });
         return;
     }
 
-    if ([BHTSettings boolForKey:@"hide_custom_timelines"]) {
-        NSArray* models = LastPinnedTimelineModels;
-        if (models.count > 0) {
-            PinnedTimelinesWriteBypass = YES;
-            ((void (*)(id, SEL, id))objc_msgSend)(repository, @selector(updatePinnedTimelines:), models);
-            PinnedTimelinesWriteBypass = NO;
+    id account = PinnedTimelineCurrentAccount();
+    if (!account) {
+        return;
+    }
+    BOOL hide = [BHTSettings boolForKey:@"hide_custom_timelines"];
+    NSHashTable* fetchedRepositories =
+        [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
+    for (id controller in [PinnedTimelineControllers() allObjects]) {
+        BHTPinnedTimelinePresentationState* state =
+            objc_getAssociatedObject(controller, PinnedTimelinePresentationStateKey);
+        id repository = state.repository;
+        if (!repository || state.account != account || !state.models) {
+            continue;
         }
-    } else if ([repository respondsToSelector:@selector(fetchPinnedTimelinesWithThrottleEnabled:)]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(
-            repository, @selector(fetchPinnedTimelinesWithThrottleEnabled:), NO);
+
+        // The hook below sends the real snapshot (including an empty one) to
+        // %orig, substituting an empty display list only while hiding.
+        ((void (*)(id, SEL, id, NSArray*))objc_msgSend)(
+            controller, @selector(pinnedTimelinesRepository:didChangeWithPinnedTimelineModels:),
+            repository, state.models);
+
+        if (!hide && ![fetchedRepositories containsObject:repository] &&
+            [repository respondsToSelector:@selector(fetchPinnedTimelinesWithThrottleEnabled:)]) {
+            [fetchedRepositories addObject:repository];
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(
+                repository, @selector(fetchPinnedTimelinesWithThrottleEnabled:), NO);
+        }
     }
 }
 
@@ -69,9 +110,18 @@ static void SyncHomeAddTabButton(id container, BOOL hidden) {
 
 - (void)pinnedTimelinesRepository:(id)repository
     didChangeWithPinnedTimelineModels:(NSArray*)models {
-    PinnedTimelinesRepository = repository;
-    if (models.count > 0) {
-        LastPinnedTimelineModels = [models copy];
+    if ([models isKindOfClass:[NSArray class]]) {
+        BHTPinnedTimelinePresentationState* state = [BHTPinnedTimelinePresentationState new];
+        state.repository = repository;
+        state.account = PinnedTimelineCurrentAccount();
+        state.models = models;
+        objc_setAssociatedObject(self, PinnedTimelinePresentationStateKey, state,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [PinnedTimelineControllers() addObject:self];
+    } else {
+        objc_setAssociatedObject(self, PinnedTimelinePresentationStateKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [PinnedTimelineControllers() removeObject:self];
     }
     BOOL hide = [BHTSettings boolForKey:@"hide_custom_timelines"];
 
@@ -98,7 +148,7 @@ static void SyncHomeAddTabButton(id container, BOOL hidden) {
 %hook _TtC32TwitterHomeFeatureImplementation31CachedPinnedTimelinesRepository
 
 - (void)updatePinnedTimelines:(id)timelines {
-    if (!PinnedTimelinesWriteBypass && [BHTSettings boolForKey:@"hide_custom_timelines"]) {
+    if ([BHTSettings boolForKey:@"hide_custom_timelines"]) {
         return;
     }
 

@@ -129,15 +129,3 @@ static void nfb_applyChatScreenTint(UIView* view) {
     nfb_applyChatScreenTint(self);
 }
 %end
-
-%hook _TtC14DMConversation29SecureContainerViewController
-- (void)loadView {
-    if (![BHTSettings boolForKey:@"block_screenshot_detection"]) {
-        %orig;
-        return;
-    }
-    
-    %orig;
-}
-
-%end

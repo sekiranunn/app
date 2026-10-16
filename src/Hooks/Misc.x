@@ -247,43 +247,74 @@ static NSString* CleanedShareURLString(NSString* urlString) {
 
 // MARK: - Disable screenshot and screen recording detection
 
+static BOOL IsCaptureNotification(NSNotificationName name) {
+    return [name isEqualToString:UIApplicationUserDidTakeScreenshotNotification] ||
+           [name isEqualToString:UIScreenCapturedDidChangeNotification];
+}
+
+static BOOL ShouldSuppressCaptureNotification(NSNotification* notification) {
+    return IsCaptureNotification(notification.name) &&
+           [BHTSettings boolForKey:@"block_screenshot_detection"];
+}
+
+// Keep the original observer registered so disabling the setting restores
+// delivery without recreating the chat. Using the same observer also preserves
+// removeObserver: semantics and NotificationCenter's observer lifetime handling.
+static SEL CaptureNotificationSelector(id observer, SEL originalSelector) {
+    Class observerClass = object_getClass(observer);
+    SEL guardedSelector = NSSelectorFromString(
+        [@"nfb_captureNotification_" stringByAppendingString:NSStringFromSelector(originalSelector)]);
+    @synchronized([NSNotificationCenter class]) {
+        if (!class_getInstanceMethod(observerClass, guardedSelector)) {
+            IMP implementation = imp_implementationWithBlock(^(id receiver, NSNotification* note) {
+                if (!ShouldSuppressCaptureNotification(note)) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(receiver, originalSelector, note);
+                }
+            });
+            if (!class_addMethod(observerClass, guardedSelector, implementation, "v@:@")) {
+                imp_removeBlock(implementation);
+                return originalSelector;
+            }
+        }
+    }
+    return guardedSelector;
+}
+
 %hook NSNotificationCenter
 
 - (id)addObserverForName:(NSNotificationName)name
                   object:(id)obj
                    queue:(NSOperationQueue*)queue
               usingBlock:(void (^)(NSNotification* note))block {
-    if ([name isEqualToString:UIApplicationUserDidTakeScreenshotNotification]) {
-        return %orig(name, obj, queue,
-                         ^(NSNotification* note){});
-    }
-    if ([name isEqualToString:UIScreenCapturedDidChangeNotification]) {
-        return %orig(name, obj, queue,
-                         ^(NSNotification* note){});
+    if (!block || (name && !IsCaptureNotification(name))) {
+        return %orig;
     }
 
-    return %orig;
+    // A nil name observes every notification, including capture notifications.
+    return %orig(name, obj, queue, ^(NSNotification* note) {
+        if (!ShouldSuppressCaptureNotification(note)) {
+            block(note);
+        }
+    });
 }
 
 - (void)addObserver:(id)observer
            selector:(SEL)aSelector
                name:(NSNotificationName)aName
              object:(id)anObject {
-    if ([aName isEqualToString:UIApplicationUserDidTakeScreenshotNotification]) {
-        return;
-    }
-    if ([aName isEqualToString:UIScreenCapturedDidChangeNotification]) {
+    if (!observer || !aSelector || (aName && !IsCaptureNotification(aName))) {
+        %orig;
         return;
     }
 
-    return %orig;
+    %orig(observer, CaptureNotificationSelector(observer, aSelector), aName, anObject);
 }
 
 %end
 
 %hook UIScreen
 - (BOOL)isCaptured {
-    return NO;
+    return [BHTSettings boolForKey:@"block_screenshot_detection"] ? NO : %orig;
 }
 %end
 

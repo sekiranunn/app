@@ -4,9 +4,8 @@
 //
 
 #import <objc/runtime.h>
+#import <string.h>
 #import "HookHelpers.h"
-
-static NSURL* nfbLastCapturedVoiceURL = nil;
 
 static BOOL IsVoiceMediaURL(NSURL* url) {
     if (url == nil) {
@@ -23,41 +22,8 @@ static BOOL IsVoiceMediaURL(NSURL* url) {
     return [audioExtensions containsObject:url.pathExtension.lowercaseString];
 }
 
-static void CaptureVoiceURL(NSURL* url, NSString* source) {
-    if (![BHTSettings boolForKey:@"download_voice_messages"]) {
-        return;
-    }
-    BOOL kept = IsVoiceMediaURL(url);
-    NSLog(@"[NFB] voice capture (%@) %@: %@", source, kept ? @"kept" : @"ignored", url);
-    if (kept) {
-        nfbLastCapturedVoiceURL = url;
-    }
-}
-
-%hook AVURLAsset
-- (id)initWithURL:(NSURL*)url options:(NSDictionary*)options {
-    CaptureVoiceURL(url, @"AVURLAsset");
-    return %orig;
-}
-%end
-
-// AVAudioPlayer is covered as well as AVURLAsset because the Chat stack no
-// longer has to build an AVPlayer to play a short local note.
-%hook AVAudioPlayer
-- (id)initWithContentsOfURL:(NSURL*)url error:(NSError**)outError {
-    CaptureVoiceURL(url, @"AVAudioPlayer");
-    return %orig;
-}
-- (id)initWithContentsOfURL:(NSURL*)url
-               fileTypeHint:(NSString*)utiString
-                      error:(NSError**)outError {
-    CaptureVoiceURL(url, @"AVAudioPlayer/fileTypeHint");
-    return %orig;
-}
-%end
-
 // DM voice notes are pre-decrypted straight to disk (Documents/dm/.../
-// decrypted-media-v2/.../*.m4a), so the captured URL is normally a local
+// decrypted-media-v2/.../*.m4a), so the view's URL is normally a local
 // file URL already -- just copy it out and hand it to the share sheet. The
 // network branch is kept as a fallback in case that ever changes.
 static void DownloadVoiceMessage(NSURL* sourceURL) {
@@ -175,6 +141,116 @@ static NSArray* DMVideoEntities(UIView* attachmentView) {
 
 static const void* kVoiceDownloadLongPressKey = &kVoiceDownloadLongPressKey;
 
+// Resolve only media actually referenced by this bubble. There is deliberately
+// no fallback to another view, a shared playback service, or the last audio
+// opened by the process. Unknown Swift value types are not object pointers.
+static BOOL VoiceObjectIsKindOfClass(id object, Class baseClass) {
+    for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls)) {
+        if (cls == baseClass) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSURL* VoiceURLForMediaObject(id object) {
+    NSURL* url = nil;
+    if (VoiceObjectIsKindOfClass(object, NSURL.class)) {
+        url = object;
+    } else if (VoiceObjectIsKindOfClass(object, AVAudioPlayer.class)) {
+        url = [(AVAudioPlayer*)object url];
+    } else {
+        AVAsset* asset = nil;
+        if (VoiceObjectIsKindOfClass(object, AVPlayer.class)) {
+            asset = [(AVPlayer*)object currentItem].asset;
+        } else if (VoiceObjectIsKindOfClass(object, AVPlayerItem.class)) {
+            asset = [(AVPlayerItem*)object asset];
+        } else if (VoiceObjectIsKindOfClass(object, AVURLAsset.class)) {
+            asset = object;
+        }
+        if ([asset isKindOfClass:AVURLAsset.class]) {
+            url = [(AVURLAsset*)asset URL];
+        }
+    }
+    return IsVoiceMediaURL(url) ? url : nil;
+}
+
+static void CollectVoiceURLsFromLayer(CALayer* layer, NSMutableSet<NSURL*>* urls,
+                                      NSUInteger depth, NSUInteger* remainingLayers) {
+    if (depth > 8 || *remainingLayers == 0) {
+        *remainingLayers = 0;
+        return;
+    }
+    --*remainingLayers;
+    if ([layer isKindOfClass:AVPlayerLayer.class]) {
+        NSURL* url = VoiceURLForMediaObject([(AVPlayerLayer*)layer player]);
+        if (url) {
+            [urls addObject:url];
+        }
+    }
+    for (CALayer* sublayer in layer.sublayers) {
+        CollectVoiceURLsFromLayer(sublayer, urls, depth + 1, remainingLayers);
+        if (*remainingLayers == 0) {
+            return;
+        }
+    }
+}
+
+static void CollectVoiceURLsFromView(UIView* view, NSMutableSet<NSURL*>* urls,
+                                     NSUInteger depth, NSUInteger* remainingViews) {
+    if (depth > 8 || *remainingViews == 0) {
+        // An incomplete traversal cannot establish an unambiguous source.
+        *remainingViews = 0;
+        return;
+    }
+    --*remainingViews;
+
+    for (Class cls = object_getClass(view); cls && cls != UIView.class;
+         cls = class_getSuperclass(cls)) {
+        const char* image = class_getImageName(cls);
+        if (!image || strncmp(image, "/System/Library/", 16) == 0 ||
+            strncmp(image, "/usr/lib/", 9) == 0) {
+            continue;
+        }
+
+        unsigned int count = 0;
+        Ivar* ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; ++i) {
+            const char* type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || type[0] != '@' || type[1] == '?') {
+                continue;
+            }
+            // object_getIvar handles Objective-C weak storage; do not read
+            // raw Swift storage or follow arbitrary model/delegate graphs.
+            NSURL* url = VoiceURLForMediaObject(object_getIvar(view, ivars[i]));
+            if (url) {
+                [urls addObject:url];
+            }
+        }
+        free(ivars);
+    }
+
+    for (UIView* subview in view.subviews) {
+        CollectVoiceURLsFromView(subview, urls, depth + 1, remainingViews);
+        if (*remainingViews == 0) {
+            return;
+        }
+    }
+}
+
+static NSURL* VoiceURLForAudioView(UIView* view) {
+    if (!view.window || ![BHTSettings boolForKey:@"download_voice_messages"]) {
+        return nil;
+    }
+    NSMutableSet<NSURL*>* urls = [NSMutableSet new];
+    NSUInteger remainingLayers = 256;
+    CollectVoiceURLsFromLayer(view.layer, urls, 0, &remainingLayers);
+    NSUInteger remainingViews = 128;
+    CollectVoiceURLsFromView(view, urls, 0, &remainingViews);
+    // Unsupported host versions or ambiguous media never get a save action.
+    return remainingLayers > 0 && remainingViews > 0 && urls.count == 1 ? urls.anyObject : nil;
+}
+
 static UILongPressGestureRecognizer* VoiceDownloadLongPressRecognizer(UIView* view) {
     return objc_getAssociatedObject(view, kVoiceDownloadLongPressKey);
 }
@@ -212,7 +288,7 @@ static void SetVoiceDownloadLongPressRecognizer(UIView* view,
 // press installs cleanly and then never begins.
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)gestureRecognizer {
     if (gestureRecognizer == VoiceDownloadLongPressRecognizer(self)) {
-        return YES;
+        return VoiceURLForAudioView(self) != nil;
     }
     return %orig;
 }
@@ -223,17 +299,24 @@ static void SetVoiceDownloadLongPressRecognizer(UIView* view,
         return;
     }
 
-    NSURL* voiceURL = nfbLastCapturedVoiceURL;
+    NSURL* voiceURL = VoiceURLForAudioView(self);
     if (voiceURL == nil) {
         return;
     }
 
+    __weak UIView* sourceView = self;
     TFNActionItem* downloadItem = [objc_getClass("TFNActionItem")
         actionItemWithTitle:[[BHTBundle sharedBundle]
                                 localizedStringForKey:@"DOWNLOAD_ACTIVITY_VIEW_LABEL"]
                   imageName:@"arrow_down_circle_stroke"
                      action:^{
-                         DownloadVoiceMessage(voiceURL);
+                         UIView* view = sourceView;
+                         // The bubble may have been reused, removed, or had
+                         // its player replaced while the menu was open.
+                         NSURL* currentURL = VoiceURLForAudioView(view);
+                         if ([currentURL isEqual:voiceURL]) {
+                             DownloadVoiceMessage(currentURL);
+                         }
                      }];
 
     TFNMenuSheetViewController* sheet = [[objc_getClass("TFNMenuSheetViewController") alloc]

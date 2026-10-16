@@ -18,6 +18,7 @@
 @implementation AppearanceSettingsViewController
 
 - (void)viewDidLoad {
+    [self migrateRegularFontSelection];
     [super viewDidLoad];
     self.tableView.estimatedRowHeight = 60;
     [self.tableView registerClass:[ModernSettingsSimpleButtonCell class]
@@ -211,6 +212,26 @@
 
 #pragma mark - Font Pickers
 
+- (void)migrateRegularFontSelection {
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    NSString* saved = [defaults stringForKey:@"bhtwitter_font_1"];
+    if (!saved.length || [UIFont fontWithName:saved size:17]) {
+        return;
+    }
+
+    // Older versions saved a family. Resolve its default face once so the
+    // existing fontWithName: consumers can use the selection after this page opens.
+    if ([UIFont fontNamesForFamilyName:saved].count == 0) {
+        return;
+    }
+    UIFontDescriptor* descriptor = [UIFontDescriptor fontDescriptorWithFontAttributes:
+        @{UIFontDescriptorFamilyAttribute: saved}];
+    UIFont* font = [UIFont fontWithDescriptor:descriptor size:17];
+    if ([font.familyName isEqualToString:saved] && font.fontName.length) {
+        [defaults setObject:font.fontName forKey:@"bhtwitter_font_1"];
+    }
+}
+
 - (void)showRegularFontPicker:(NSDictionary*)sender {
     UIFontPickerViewControllerConfiguration* configuration =
         [[UIFontPickerViewControllerConfiguration alloc] init];
@@ -258,15 +279,20 @@
 }
 
 - (void)fontPickerViewControllerDidPickFont:(UIFontPickerViewController*)viewController {
-    NSString* fontName =
-        viewController.selectedFontDescriptor.fontAttributes[UIFontDescriptorNameAttribute];
-    NSString* fontFamily =
-        viewController.selectedFontDescriptor.fontAttributes[UIFontDescriptorFamilyAttribute];
+    UIFontDescriptor* descriptor = viewController.selectedFontDescriptor;
+    if (!descriptor) {
+        return;
+    }
+    // A family selection still needs a concrete face name for fontWithName:.
+    NSString* fontName = [UIFont fontWithDescriptor:descriptor size:17].fontName;
+    if (!fontName.length) {
+        return;
+    }
     NSString* fontType = objc_getAssociatedObject(viewController, @"fontType");
     if ([fontType isEqualToString:@"bold"]) {
         [[NSUserDefaults standardUserDefaults] setObject:fontName forKey:@"bhtwitter_font_2"];
     } else {
-        [[NSUserDefaults standardUserDefaults] setObject:fontFamily forKey:@"bhtwitter_font_1"];
+        [[NSUserDefaults standardUserDefaults] setObject:fontName forKey:@"bhtwitter_font_1"];
     }
     [self updateVisibleToggles];
     [self.tableView reloadData];

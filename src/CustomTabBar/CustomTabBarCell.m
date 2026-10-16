@@ -97,7 +97,7 @@
 }
 
 - (void)applyAppearance {
-    // Card background: the fixed (Home) tile uses the inactive container colour.
+    // Fixed tabs use the inactive container colour.
     self.container.backgroundColor =
         self.fixed ? CustomTabBarInactiveCardBackgroundColor()
                    : CustomTabBarCardBackgroundColor();

@@ -18,8 +18,9 @@ extern UIColor* CurrentAccentColor(void);
 
 // UIApplication's alternateIconName getter goes stale on sideloaded installs
 // (setting the icon works, but the getter keeps reporting an old name across
-// reinstalls), so the last choice made here is what the radios trust.
-static NSString* const kLastSelectedIconKey = @"bh_last_selected_app_icon";
+// reinstalls), so the last confirmed choice is what the radios trust. The old
+// key was written before completion and can contain a failed choice.
+static NSString* const kLastConfirmedIconKey = @"bh_last_confirmed_app_icon";
 static NSString* const kPrimaryIconSentinel = @"PrimaryIcon";
 
 @interface UIColor (NativeTokens_AppIconVC)
@@ -60,6 +61,7 @@ static NSString* AppIconDetailText(void) {
                                      UICollectionViewDelegateFlowLayout>
 @property (nonatomic, strong) UICollectionView* appIconCollectionView;
 @property (nonatomic, copy) NSArray<AppIconItem*>* icons;
+@property (nonatomic, assign) BOOL changingIcon;
 @end
 
 @implementation AppIconViewController
@@ -68,6 +70,7 @@ static NSString* AppIconDetailText(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"bh_last_selected_app_icon"];
 
     self.navigationItem.title = [[BHTBundle sharedBundle]
         localizedStringForKey:@"SUBSCRIPTION_APP_ICON_SETTINGS_TITLE"];
@@ -198,7 +201,7 @@ static NSString* AppIconDetailText(void) {
 
 - (BOOL)isItemActive:(AppIconItem*)item {
     NSString* saved = [[NSUserDefaults standardUserDefaults]
-        stringForKey:kLastSelectedIconKey];
+        stringForKey:kLastConfirmedIconKey];
     NSString* current =
         saved ?: [UIApplication sharedApplication].alternateIconName;
 
@@ -237,23 +240,52 @@ static NSString* AppIconDetailText(void) {
 
 - (void)collectionView:(UICollectionView*)cv
     didSelectItemAtIndexPath:(NSIndexPath*)ip {
-    if (![UIApplication sharedApplication].supportsAlternateIcons)
+    if (self.changingIcon ||
+        ![UIApplication sharedApplication].supportsAlternateIcons)
         return;
 
     AppIconItem* item = self.icons[ip.row];
-    if ([self isItemActive:item])
+    NSString* confirmedChoice = [[NSUserDefaults standardUserDefaults]
+        stringForKey:kLastConfirmedIconKey];
+    // The system getter is only a display fallback. Until a choice has been
+    // confirmed, let the user reapply any icon even if it appears selected.
+    if (confirmedChoice && [self isItemActive:item])
         return;
 
     NSString* toSet = item.isPrimaryIcon ? nil : item.bundleIconName;
 
-    [[NSUserDefaults standardUserDefaults]
-        setObject:(toSet ?: kPrimaryIconSentinel)
-           forKey:kLastSelectedIconKey];
-    [cv reloadData];
-
+    self.changingIcon = YES;
+    cv.userInteractionEnabled = NO;
+    __weak typeof(self) weakSelf = self;
     // A block is always passed: nil name + nil handler crashes UIKit.
     [[UIApplication sharedApplication] setAlternateIconName:toSet
-                                          completionHandler:^(NSError* _Nullable error){}];
+                                          completionHandler:^(NSError* _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!error) {
+                [[NSUserDefaults standardUserDefaults]
+                    setObject:(toSet ?: kPrimaryIconSentinel)
+                       forKey:kLastConfirmedIconKey];
+            }
+
+            AppIconViewController* strongSelf = weakSelf;
+            strongSelf.changingIcon = NO;
+            strongSelf.appIconCollectionView.userInteractionEnabled = YES;
+            [strongSelf.appIconCollectionView reloadData];
+            if (error && strongSelf.view.window) {
+                UIAlertController* alert = [UIAlertController
+                    alertControllerWithTitle:[[BHTBundle sharedBundle]
+                        localizedTwitterStringForKey:@"ERROR_ALERT_TITLE"]
+                                     message:error.localizedDescription
+                              preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction
+                    actionWithTitle:[[BHTBundle sharedBundle]
+                        localizedTwitterStringForKey:@"OK_ACTION_LABEL"]
+                              style:UIAlertActionStyleDefault
+                            handler:nil]];
+                [strongSelf presentViewController:alert animated:YES completion:nil];
+            }
+        });
+    }];
 }
 
 #pragma mark - Section header

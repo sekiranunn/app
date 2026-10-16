@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 // pageID of the Home tab, which is always kept visible and pinned first.
 extern NSString* const CustomTabBarHomePageID;
+// More is the required entry point for the remaining panels, pinned last.
+extern NSString* const CustomTabBarMorePageID;
 
 // Registry keys for a captured tab's metadata.
 extern NSString* const TabPageKey; // scribePage identifier
@@ -33,9 +35,9 @@ extern NSString* const TabPanelIDKey; // T1 panel ID (NSNumber)
 // Metadata for a single tab, or nil if it has never been seen.
 + (nullable NSDictionary*)metadataForPage:(NSString*)pageID;
 
-// The visible tabs in the user's chosen order (Home first). Returns nil when
-// the user has never customised the bar, so callers can fall back to the
-// default.
+// The visible tabs in the user's chosen order (Home first, More last). Returns
+// nil when the user has never customised the bar, so callers can fall back to
+// the default.
 + (nullable NSArray<NSString*>*)visiblePageIDsInOrder;
 
 // Persists the editor's selection; every other tab is hidden.
@@ -44,8 +46,8 @@ extern NSString* const TabPanelIDKey; // T1 panel ID (NSNumber)
 // Clears the user's selection, reverting to the default layout.
 + (void)resetSelection;
 
-// The tabs shown until the user customises the bar: Home, Search, Notifications
-// and Chats. Everything else the app offers is available in the editor but
+// The tabs shown until the user customises the bar: Home, Search, Notifications,
+// Chats and More. Everything else the app offers is available in the editor but
 // hidden.
 + (NSArray<NSString*>*)defaultVisiblePageIDs;
 

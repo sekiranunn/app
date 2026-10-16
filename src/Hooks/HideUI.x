@@ -11,6 +11,49 @@
 
 // MARK: - Hide Blue verified checkmark
 
+// Badge rendering can hide verification, but timeline filters must read the
+// real author state. Keep the bypass local to the current call/thread.
+static __thread BOOL ReportGenuineVerification = NO;
+
+static BOOL ReadGenuineAuthorVerification(id viewModel, BOOL* verified) {
+    for (NSString* name in @[@"representedFromUser", @"fromUser"]) {
+        SEL authorSelector = NSSelectorFromString(name);
+        if (![viewModel respondsToSelector:authorSelector]) {
+            continue;
+        }
+        id author = ((id (*)(id, SEL))objc_msgSend)(viewModel, authorSelector);
+        BOOL hasVerified = [author respondsToSelector:@selector(verified)];
+        BOOL hasBlueVerified = [author respondsToSelector:@selector(isBlueVerified)];
+        if (hasVerified || hasBlueVerified) {
+            BOOL legacyVerified = hasVerified &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(author, @selector(verified));
+            id blueVerified = hasBlueVerified
+                ? ((id (*)(id, SEL))objc_msgSend)(author, @selector(isBlueVerified)) : nil;
+            *verified = legacyVerified ||
+                ([blueVerified respondsToSelector:@selector(boolValue)] && [blueVerified boolValue]);
+            return YES;
+        }
+    }
+    return NO;
+}
+
+BOOL BHTStatusIsGenuinelyVerified(id viewModel) {
+    BOOL saved = ReportGenuineVerification;
+    ReportGenuineVerification = YES;
+    @try {
+        // The adapter can cache NO at initialization while badges are hidden.
+        // Reading its source author avoids treating that display cache as truth.
+        BOOL verified = NO;
+        if (ReadGenuineAuthorVerification(viewModel, &verified)) {
+            return verified;
+        }
+        return [viewModel respondsToSelector:@selector(isFromUserVerified)] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(viewModel, @selector(isFromUserVerified));
+    } @finally {
+        ReportGenuineVerification = saved;
+    }
+}
+
 // The author-row badge (SimpleBadgeable.init(statusViewModel:)) builds from the
 // merged verified flag plus identityType and ignores isBlueVerified, so both
 // getters must be silenced; brand/government badges survive via identityType.
@@ -19,11 +62,11 @@
 %hook TFSTwitterUser
 
 - (id)isBlueVerified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
 }
 
 - (BOOL)verified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 
 %end
@@ -33,11 +76,11 @@
 %hook TFSTwitterUserSource
 
 - (id)isBlueVerified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
 }
 
 - (BOOL)verified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 
 %end
@@ -45,11 +88,11 @@
 %hook TFSTwitterTypeaheadUser
 
 - (id)isBlueVerified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
 }
 
 - (BOOL)verified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 
 %end
@@ -57,11 +100,11 @@
 %hook TFSDirectMessageUser
 
 - (id)isBlueVerified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? nil : %orig;
 }
 
 - (BOOL)verified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 
 %end
@@ -72,10 +115,17 @@
 %hook T1TwitterCoreStatusViewModelAdapter
 
 - (BOOL)isFromUserBlueVerified {
-    return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
+    return !ReportGenuineVerification && [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 
 - (BOOL)isFromUserVerified {
+    if (ReportGenuineVerification) {
+        BOOL verified = NO;
+        if (ReadGenuineAuthorVerification(self, &verified)) {
+            return verified;
+        }
+        return %orig;
+    }
     return [BHTSettings boolForKey:@"hide_blue_verified"] ? NO : %orig;
 }
 

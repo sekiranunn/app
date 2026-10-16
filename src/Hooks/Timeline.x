@@ -228,9 +228,8 @@ static BOOL ItemIsRetweet(id viewModel) {
 // Everything the per-item filters need to know about one section update: which
 // hide toggles are on, which screen the timeline is being shown on, and the
 // conversation lookups those two imply. Adding a filter or a surface means
-// adding a property here, a line in +contextForDataViewController: and a line
-// in -isEqualToContext:, instead of another argument threaded through every
-// function in this section.
+// adding a property here and a line in +contextForDataViewController:, instead
+// of another argument threaded through every function in this section.
 @interface BHTimelineFilterContext : NSObject
 
 // Hide toggles, already resolved against the surface — hideVerified stays off
@@ -260,18 +259,12 @@ static BOOL ItemIsRetweet(id viewModel) {
 
 + (instancetype)contextForDataViewController:(TFNItemsDataViewController*)dataViewController;
 - (void)resolveConversationLookupsInSections:(NSArray*)sections;
-- (BOOL)isEqualToContext:(BHTimelineFilterContext*)other;
 
 @end
 
 static BOOL BHShouldHideVerifiedItem(id viewModel, BHTimelineFilterContext* context) {
-    SEL verifiedSelector = @selector(isFromUserVerified);
-    if (![viewModel respondsToSelector:verifiedSelector]) {
-        return NO;
-    }
-
-    BOOL verified = ((BOOL (*)(id, SEL))objc_msgSend)(viewModel, verifiedSelector);
-    if (!verified) {
+    if (![viewModel respondsToSelector:@selector(isFromUserVerified)] ||
+        !BHTStatusIsGenuinelyVerified(viewModel)) {
         return NO;
     }
 
@@ -366,44 +359,6 @@ static BOOL ShouldHideTimelineItem(id item, BHTimelineFilterContext* context) {
     }
 
     return NO;
-}
-
-// Calling ShouldHideTimelineItem() for every item on every section update slows
-// the app down a LOT, so verdicts are memoized by entry ID. They only hold for
-// the context that produced them; a different context drops the whole cache.
-static NSCache<NSString*, NSNumber*>* TimelineVerdictCacheForContext(
-    BHTimelineFilterContext* context) {
-    static NSCache<NSString*, NSNumber*>* cache;
-    static BHTimelineFilterContext* cachedContext;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        cache = [NSCache new];
-        cache.countLimit = 4000;
-    });
-
-    if (![context isEqualToContext:cachedContext]) {
-        [cache removeAllObjects];
-        cachedContext = context;
-    }
-
-    return cache;
-}
-
-static BOOL MemoizedShouldHideTimelineItem(id item, NSCache<NSString*, NSNumber*>* cache,
-                                           BHTimelineFilterContext* context) {
-    NSString* entryID = ItemEntryID(unwrapDataViewItem(item));
-    if (!entryID) {
-        return ShouldHideTimelineItem(item, context);
-    }
-
-    NSNumber* cached = [cache objectForKey:entryID];
-    if (cached) {
-        return cached.boolValue;
-    }
-
-    BOOL hide = ShouldHideTimelineItem(item, context);
-    [cache setObject:@(hide) forKey:entryID];
-    return hide;
 }
 
 static long long ConversationRootUserID(NSArray* sections) {
@@ -501,24 +456,6 @@ static NSSet<NSNumber*>* ConversationAuthorRepliedToUserIDs(NSArray* sections,
         ConversationAuthorRepliedToUserIDs(sections, self.conversationRootUserID);
 }
 
-- (BOOL)isEqualToContext:(BHTimelineFilterContext*)other {
-    if (!other) {
-        return NO;
-    }
-
-    return self.hideWhoToFollow == other.hideWhoToFollow &&
-           self.hidePrompts == other.hidePrompts && self.hideVerified == other.hideVerified &&
-           self.hideBlockedRetweets == other.hideBlockedRetweets &&
-           self.inConversation == other.inConversation && self.inProfile == other.inProfile &&
-           self.inSearch == other.inSearch &&
-           self.hideQuoteTweets == other.hideQuoteTweets &&
-            self.hideRetweets == other.hideRetweets &&
-           self.conversationRootUserID == other.conversationRootUserID &&
-           self.inEditHistory == other.inEditHistory &&
-           (self.authorRepliedToUserIDs == other.authorRepliedToUserIDs ||
-            [self.authorRepliedToUserIDs isEqualToSet:other.authorRepliedToUserIDs]);
-}
-
 @end
 
 static NSArray* FilteredTimelineSections(TFNItemsDataViewController* dataViewController,
@@ -530,7 +467,6 @@ static NSArray* FilteredTimelineSections(TFNItemsDataViewController* dataViewCon
     }
 
     [context resolveConversationLookupsInSections:sections];
-    NSCache<NSString*, NSNumber*>* verdicts = TimelineVerdictCacheForContext(context);
 
     // Modules can share a section with unrelated items, so filtering is per item;
     // a purely filtered section (like the Discover More one) empties and is dropped.
@@ -547,7 +483,9 @@ static NSArray* FilteredTimelineSections(TFNItemsDataViewController* dataViewCon
         NSMutableIndexSet* removed = [NSMutableIndexSet indexSet];
 
         for (NSUInteger i = 0; i < items.count; i++) {
-            if (MemoizedShouldHideTimelineItem(items[i], verdicts, context)) {
+            // Follow, bookmark, block and account state can change while the
+            // entry ID stays the same, so reread the current model each update.
+            if (ShouldHideTimelineItem(items[i], context)) {
                 [removed addIndex:i];
             }
         }

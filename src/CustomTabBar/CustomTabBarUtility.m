@@ -109,15 +109,10 @@ static NSString* const kLegacyHiddenKey = @"bh_tabs_hidden";
 
 #pragma mark - Selection
 
-+ (NSArray<NSString*>*)visiblePageIDsInOrder {
-    NSArray<NSString*>* visible =
-        [[NSUserDefaults standardUserDefaults] stringArrayForKey:kVisibleKey];
-    if (!visible) {
-        return nil;
-    }
-
-    NSMutableArray<NSString*>* pageIDs = [visible mutableCopy];
-    // Home is always visible and always first.
++ (NSArray<NSString*>*)normalizedPageIDs:(NSArray<NSString*>*)visible {
+    NSMutableArray<NSString*>* pageIDs =
+        [[[NSOrderedSet orderedSetWithArray:visible] array] mutableCopy];
+    // The editor, stored selection and live bar all use the same fixed edges.
     [pageIDs removeObject:CustomTabBarHomePageID];
     [pageIDs insertObject:CustomTabBarHomePageID atIndex:0];
     [pageIDs removeObject:CustomTabBarMorePageID];
@@ -125,8 +120,19 @@ static NSString* const kLegacyHiddenKey = @"bh_tabs_hidden";
     return pageIDs;
 }
 
++ (NSArray<NSString*>*)visiblePageIDsInOrder {
+    NSArray<NSString*>* visible =
+        [[NSUserDefaults standardUserDefaults] stringArrayForKey:kVisibleKey];
+    if (!visible) {
+        return nil;
+    }
+
+    return [self normalizedPageIDs:visible];
+}
+
 + (void)setVisiblePageIDs:(NSArray<NSString*>*)visible {
-    [[NSUserDefaults standardUserDefaults] setObject:visible forKey:kVisibleKey];
+    [[NSUserDefaults standardUserDefaults] setObject:[self normalizedPageIDs:visible]
+                                            forKey:kVisibleKey];
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:kLegacyHiddenKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
